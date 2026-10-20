@@ -1,0 +1,23 @@
+# n8n فقط داخل Docker. FastAPI و React يعملان مباشرة على ويندوز (انظر README).
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: mostaql-n8n
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"   # متاح لجهازك فقط
+    environment:
+      - GENERIC_TIMEZONE=Asia/Hebron
+      - TZ=Asia/Hebron
+      - N8N_SECURE_COOKIE=false            # لأننا نستخدم http محلياً
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false # ليقرأ الـ workflow التوكن والسر من البيئة
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - N8N_SHARED_SECRET=${N8N_SHARED_SECRET}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # للوصول إلى FastAPI على ويندوز عند الحاجة
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n:/import:ro
+
+volumes:
+  n8n_data:
