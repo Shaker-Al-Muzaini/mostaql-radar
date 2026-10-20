@@ -29,6 +29,12 @@ class Project(SQLModel, table=True):
     first_seen_at: datetime = Field(default_factory=now)
 
 
+class SeenProject(SQLModel, table=True):
+    """سجل خفيف بأرقام المشاريع التي عولجت، يمنع تكرار الإشعار بعد حذف الصف."""
+    mostaql_id: str = Field(primary_key=True)
+    seen_at: datetime = Field(default_factory=now)
+
+
 class Proposal(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="project.id", index=True)

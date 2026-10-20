@@ -26,7 +26,12 @@ class Settings(BaseSettings):
     delay_max: float = 7.0
     headless: bool = True
     auto_refresh: bool = True
-    refresh_interval_min: int = 15
+    refresh_interval_min: int = 3  # فترة الفحص بالدقائق
+    min_interval_min: int = 2  # حد أدنى لحماية الحساب من الحظر
+    show_minutes: int = 10  # مدة بقاء المشروع في الصفحة
+    keep_hours: int = 24  # بعدها يُحذف من القاعدة (تبقى أزرار تيليجرام صالحة حتى ذلك الحين)
+    max_recent: int = 5  # أقصى عدد مشاريع في الصفحة
+    fresh_window_min: int = 45  # المشروع المنشور قبل أكثر من هذا لا يُعدّ «جديداً»
 
     # الذكاء الاصطناعي
     gemini_api_key: str = ""

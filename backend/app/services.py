@@ -1,13 +1,15 @@
 """منطق العمل: التحديث، التقييم، المسودات."""
 import logging
 import threading
+from datetime import timedelta
 
 from sqlmodel import Session, select
 
 from . import ai, notify
 from .config import get_settings
 from .db import engine
-from .models import Project, Proposal, RefreshRun, now
+from .models import Project, Proposal, RefreshRun, SeenProject, now
+from .scraper import BlockedError
 
 log = logging.getLogger("radar.services")
 s = get_settings()
@@ -38,6 +40,88 @@ def _stage(db: Session, run: RefreshRun, stage: str) -> None:
     db.commit()
 
 
+def _pick_fresh(db: Session, items) -> list:
+    """يفصل الجديد فعلاً عن المعروف. غير الجديد يُسجَّل «مرئياً» بصمت دون إشعار."""
+    known = set(db.exec(select(SeenProject.mostaql_id)).all())
+    known |= set(db.exec(select(Project.mostaql_id)).all())
+    first_run = not known
+    cutoff = now() - timedelta(minutes=s.fresh_window_min)
+    fresh = []
+    for it in items:
+        if it.mostaql_id in known:
+            continue
+        at = getattr(it, "posted_at", None)
+        is_fresh = (not first_run) if at is None else at >= cutoff
+        if is_fresh:
+            fresh.append(it)
+        else:
+            db.add(SeenProject(mostaql_id=it.mostaql_id))
+    db.commit()
+    fresh.sort(key=lambda i: getattr(i, "posted_at", None) or cutoff, reverse=True)
+    return fresh[: s.max_detail_fetch]
+
+
+def _process_item(db: Session, sc, it, notified_so_far: int) -> int:
+    """مشروع جديد واحد: حفظ، تفاصيل، تقييم، ثم إشعار فوري. يعيد 1 إن أُرسل إشعار."""
+    db.add(SeenProject(mostaql_id=it.mostaql_id))
+    p = Project(
+        mostaql_id=it.mostaql_id, title=it.title, url=it.url,
+        budget_min=it.budget_min, budget_max=it.budget_max,
+        proposals_count=it.proposals_count, posted_text=it.posted_text,
+    )
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    try:
+        d = sc.project_detail(p.url)
+        p.description = d.description or p.description
+        p.category = d.category or p.category
+        p.budget_min = d.budget_min if d.budget_min is not None else p.budget_min
+        p.budget_max = d.budget_max if d.budget_max is not None else p.budget_max
+        p.detail_fetched = True
+    except BlockedError:
+        raise
+    except Exception:  # noqa: BLE001
+        log.exception("تعذّر جلب تفاصيل %s", p.url)
+    try:
+        r = ai.score_project(p)
+    except Exception:  # noqa: BLE001
+        log.exception("فشل التقييم، استخدام التقييم الاحتياطي")
+        r = ai.fallback_score(p)
+    p.ai_score = r["score"]
+    p.ai_summary = r.get("summary", "")
+    p.ai_reason = r.get("reason", "")
+    p.category = p.category or r.get("category", "")
+    db.add(p)
+    db.commit()
+    if p.ai_score >= s.notify_threshold and notified_so_far < s.max_notify_per_refresh:
+        try:
+            notify.notify_project(p)
+            p.notified = True
+            db.add(p)
+            db.commit()
+            return 1
+        except Exception:  # noqa: BLE001
+            log.exception("فشل إرسال الإشعار")
+    return 0
+
+
+def purge_old(db: Session) -> None:
+    """حذف المشاريع الأقدم من keep_hours (إلا ما له مسودة عرض)، مع تذكّر أرقامها."""
+    cut = now() - timedelta(hours=s.keep_hours)
+    with_proposal = set(db.exec(select(Proposal.project_id)).all())
+    seen = set(db.exec(select(SeenProject.mostaql_id)).all())
+    for p in db.exec(select(Project).where(Project.first_seen_at < cut)).all():
+        if p.id in with_proposal:
+            continue
+        if p.mostaql_id not in seen:
+            db.add(SeenProject(mostaql_id=p.mostaql_id))
+        db.delete(p)
+    for x in db.exec(select(SeenProject).where(SeenProject.seen_at < now() - timedelta(days=7))).all():
+        db.delete(x)
+    db.commit()
+
+
 def _refresh_worker(run_id: int) -> None:
     if not _lock.acquire(blocking=False):
         return
@@ -49,74 +133,23 @@ def _refresh_worker(run_id: int) -> None:
             try:
                 with Scraper() as sc:
                     _stage(db, run, "سحب قائمة المشاريع")
-                    items = sc.list_projects()
-                    known = set(db.exec(select(Project.mostaql_id)).all())
-                    fresh = [i for i in items if i.mostaql_id not in known]
+                    fresh = _pick_fresh(db, sc.list_projects())
                     run.new_count = len(fresh)
-                    for it in fresh:
-                        db.add(Project(
-                            mostaql_id=it.mostaql_id, title=it.title, url=it.url,
-                            budget_min=it.budget_min, budget_max=it.budget_max,
-                            proposals_count=it.proposals_count, posted_text=it.posted_text,
-                        ))
-                    db.commit()
-
-                    new_projects = db.exec(
-                        select(Project).where(Project.detail_fetched == False)  # noqa: E712
-                        .order_by(Project.id.desc()).limit(s.max_detail_fetch)
-                    ).all()
-                    for i, p in enumerate(new_projects, 1):
-                        _stage(db, run, f"تفاصيل المشاريع ({i}/{len(new_projects)})")
-                        d = sc.project_detail(p.url)
-                        p.description = d.description or p.description
-                        p.category = d.category or p.category
-                        p.budget_min = d.budget_min if d.budget_min is not None else p.budget_min
-                        p.budget_max = d.budget_max if d.budget_max is not None else p.budget_max
-                        p.detail_fetched = True
-                        db.add(p)
-                        db.commit()
-
-                    _stage(db, run, "مزامنة عروضي")
-                    mine = sc.my_proposal_ids()
-                    if mine:
-                        for p in db.exec(select(Project).where(Project.mostaql_id.in_(mine))).all():
-                            p.has_my_proposal = True
-                            p.status = "applied"
-                            db.add(p)
-                        db.commit()
-
-                _stage(db, run, "التقييم بالذكاء الاصطناعي")
-                to_score = db.exec(
-                    select(Project).where(Project.ai_score == None, Project.has_my_proposal == False)  # noqa: E711,E712
-                    .order_by(Project.id.desc()).limit(s.max_ai_per_refresh)
-                ).all()
-                for p in to_score:
-                    r = ai.score_project(p)
-                    p.ai_score = r["score"]
-                    p.ai_summary = r.get("summary", "")
-                    p.ai_reason = r.get("reason", "")
-                    p.category = p.category or r.get("category", "")
-                    db.add(p)
-                db.commit()
-
-                _stage(db, run, "إرسال الإشعارات")
-                hot = db.exec(
-                    select(Project).where(
-                        Project.notified == False, Project.ai_score >= s.notify_threshold,  # noqa: E712
-                        Project.has_my_proposal == False,
-                    ).order_by(Project.ai_score.desc()).limit(s.max_notify_per_refresh)
-                ).all()
-                for p in hot:
-                    notify.notify_project(p)
-                    p.notified = True
-                    db.add(p)
-                run.notified_count = len(hot)
+                    notified = 0
+                    for i, it in enumerate(fresh, 1):
+                        _stage(db, run, f"معالجة مشروع جديد ({i}/{len(fresh)})")
+                        notified += _process_item(db, sc, it, notified)
+                    run.notified_count = notified
                 run.status, run.stage, run.finished_at = "done", "اكتمل", now()
             except Exception as e:  # noqa: BLE001
                 log.exception("فشل التحديث")
                 run.status, run.error, run.finished_at = "error", str(e)[:500], now()
             db.add(run)
             db.commit()
+            try:
+                purge_old(db)
+            except Exception:  # noqa: BLE001
+                log.exception("فشل التنظيف الدوري")
     finally:
         _lock.release()
 

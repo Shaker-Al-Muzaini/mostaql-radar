@@ -1,83 +1,73 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
-import Projects from "./pages/Projects.jsx";
-import Proposals from "./pages/Proposals.jsx";
+import ProjectCard from "./components/ProjectCard.jsx";
 
-function RefreshButton({ onDone }) {
-  const [state, setState] = useState({ running: false, stage: "", error: "", info: "" });
-  const timer = useRef(null);
+const POLL_MS = 15000;
 
-  const poll = useCallback(async () => {
+export default function App() {
+  const [data, setData] = useState({ items: [], interval_min: 3, show_minutes: 10, running: false });
+  const [error, setError] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [tick, setTick] = useState(Date.now());
+  const fetchedAt = useRef(Date.now());
+
+  async function load() {
     try {
-      const { running, run } = await api.refreshStatus();
-      if (running) {
-        setState({ running: true, stage: run?.stage || "جارٍ العمل…", error: "", info: "" });
-        timer.current = setTimeout(poll, 2000);
-        return;
-      }
-      if (run?.status === "error") {
-        setState({ running: false, stage: "", error: run.error || "فشل التحديث", info: "" });
-      } else if (run?.status === "done") {
-        setState({
-          running: false, stage: "", error: "",
-          info: `جديد: ${run.new_count} · أُرسل: ${run.notified_count}`,
-        });
-      } else {
-        setState((s) => ({ ...s, running: false }));
-      }
-      onDone();
+      const d = await api.recent();
+      fetchedAt.current = Date.now();
+      setData(d);
+      setError("");
     } catch (e) {
-      setState({ running: false, stage: "", error: e.message, info: "" });
-    }
-  }, [onDone]);
-
-  useEffect(() => () => clearTimeout(timer.current), []);
-
-  async function start() {
-    setState({ running: true, stage: "بدء التحديث…", error: "", info: "" });
-    try {
-      await api.refresh();
-      timer.current = setTimeout(poll, 1500);
-    } catch (e) {
-      setState({ running: false, stage: "", error: e.message, info: "" });
+      setError(e.message);
+    } finally {
+      setLoaded(true);
     }
   }
 
-  return (
-    <div className="refresh">
-      <button className="btn primary" onClick={start} disabled={state.running}>
-        {state.running ? "جارٍ التحديث…" : "تحديث الآن"}
-      </button>
-      <span className="refresh-msg" role="status" aria-live="polite">
-        {state.running && state.stage}
-        {state.error && <span className="err">{state.error}</span>}
-        {!state.running && !state.error && state.info}
-      </span>
-    </div>
-  );
-}
+  useEffect(() => {
+    load();
+    const poll = setInterval(load, POLL_MS);
+    const clockTimer = setInterval(() => setTick(Date.now()), 1000);
+    return () => {
+      clearInterval(poll);
+      clearInterval(clockTimer);
+    };
+  }, []);
 
-export default function App() {
-  const [tab, setTab] = useState("projects");
-  const [version, setVersion] = useState(0);
-  const bump = useCallback(() => setVersion((v) => v + 1), []);
+  // العدّ التنازلي محلياً بين كل طلبين، وتختفي البطاقة فور انتهاء وقتها
+  const elapsed = Math.floor((tick - fetchedAt.current) / 1000);
+  const items = data.items.map((p) => ({ p, left: p.seconds_left - elapsed })).filter((x) => x.left > 0);
 
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">📡 رادار مستقل</div>
-        <nav>
-          <button className={tab === "projects" ? "tab active" : "tab"} onClick={() => setTab("projects")}>
-            المشاريع
-          </button>
-          <button className={tab === "proposals" ? "tab active" : "tab"} onClick={() => setTab("proposals")}>
-            العروض
-          </button>
-        </nav>
-        <RefreshButton onDone={bump} />
+      <header className="top">
+        <div className="brand">
+          <span className="dot" />
+          رادار مستقل
+        </div>
+        <div className="live">
+          {error ? "انقطع الاتصال بالخادم" : data.running ? "يفحص الآن…" : `مباشر · فحص كل ${data.interval_min} دقائق`}
+        </div>
       </header>
+
       <main>
-        {tab === "projects" ? <Projects version={version} /> : <Proposals version={version} />}
+        {error && <div className="alert">{error}</div>}
+
+        {items.length > 0 ? (
+          <section className="list">
+            {items.map(({ p, left }) => (
+              <ProjectCard key={p.id} p={p} left={left} />
+            ))}
+          </section>
+        ) : (
+          loaded && (
+            <section className="empty">
+              <div className="radar"><i /></div>
+              <h2>لا مشاريع جديدة الآن</h2>
+              <p>يظهر كل مشروع جديد هنا لمدة {data.show_minutes} دقائق ثم يختفي تلقائياً.</p>
+            </section>
+          )
+        )}
       </main>
     </div>
   );

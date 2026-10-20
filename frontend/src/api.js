@@ -1,14 +1,9 @@
 const BASE = import.meta.env.VITE_API_URL || "";
 const KEY = import.meta.env.VITE_API_KEY || "";
 
-async function request(path, options = {}) {
+async function request(path) {
   const res = await fetch(BASE + path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(KEY ? { "X-API-Key": KEY } : {}),
-      ...(options.headers || {}),
-    },
+    headers: KEY ? { "X-API-Key": KEY } : {},
   });
   if (!res.ok) {
     let detail = res.statusText;
@@ -22,26 +17,6 @@ async function request(path, options = {}) {
   return res.json();
 }
 
-const qs = (params) => {
-  const p = new URLSearchParams();
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== "" && v !== null && v !== undefined && v !== false && v !== 0) p.set(k, v);
-  });
-  const s = p.toString();
-  return s ? `?${s}` : "";
-};
-
 export const api = {
-  projects: (filters) => request(`/api/projects${qs(filters)}`),
-  project: (id) => request(`/api/projects/${id}`),
-  setProjectStatus: (id, status) =>
-    request(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }),
-  categories: () => request("/api/categories"),
-  draft: (id) => request(`/api/projects/${id}/draft`, { method: "POST" }),
-  proposals: (status = "") => request(`/api/proposals${qs({ status })}`),
-  patchProposal: (id, body) =>
-    request(`/api/proposals/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  proposalToTelegram: (id) => request(`/api/proposals/${id}/telegram`, { method: "POST" }),
-  refresh: () => request("/api/refresh", { method: "POST" }),
-  refreshStatus: () => request("/api/refresh/status"),
+  recent: () => request("/api/recent"),
 };

@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import datetime, timezone
 import tempfile
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def test_refresh_pipeline_with_fake_scraper(client, monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *a): pass
         def list_projects(self):
-            return [ListItem("100", "أتمتة وسحب بيانات بـ n8n و fastapi", "https://mostaql.com/project/100", 100, 300, 2)]
+            return [ListItem("100", "أتمتة وسحب بيانات بـ n8n و fastapi", "https://mostaql.com/project/100", 100, 300, 2, posted_at=datetime.now(timezone.utc))]
         def project_detail(self, url):
             return Detail(description="نحتاج scraping و أتمتة عبر n8n وبوت تيليجرام و api", category="برمجة")
         def my_proposal_ids(self): return None
@@ -93,3 +94,10 @@ def test_refresh_pipeline_with_fake_scraper(client, monkeypatch):
     assert st["run"]["status"] == "done", st
     assert st["run"]["new_count"] == 1 and st["run"]["notified_count"] == 1
     assert len(sent) == 1 and "مشروع مناسب" in sent[0]
+
+
+def test_recent_endpoint(client):
+    d = client.get("/api/recent", headers=H).json()
+    ids = [p["mostaql_id"] for p in d["items"]]
+    assert "100" in ids and len(ids) <= 5
+    assert all(0 < p["seconds_left"] <= d["show_minutes"] * 60 for p in d["items"])

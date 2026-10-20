@@ -61,7 +61,8 @@ class Scraper:
     def list_projects(self) -> list[ListItem]:
         items: dict[str, ListItem] = {}
         for page_no in range(1, s.max_list_pages + 1):
-            html = self._get(f"{s.list_path}?page={page_no}")
+            sep = "&" if "?" in s.list_path else "?"
+            html = self._get(f"{s.list_path}{sep}page={page_no}")
             for it in parse_list(html, s.mostaql_base):
                 items.setdefault(it.mostaql_id, it)
             self._pause()

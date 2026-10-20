@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -78,6 +79,32 @@ def list_projects(
         stmt = stmt.where(Project.has_my_proposal == False)  # noqa: E712
     rows = db.exec(stmt.order_by(Project.id.desc()).offset(offset).limit(limit)).all()
     return rows
+
+
+@api.get("/recent")
+def recent(db: Session = Depends(get_session)):
+    """آخر المشاريع ضمن نافذة العرض فقط (الأحدث أولاً، حد أقصى max_recent)."""
+    n = datetime.now(timezone.utc).replace(tzinfo=None)
+    rows = db.exec(
+        select(Project)
+        .where(Project.first_seen_at >= n - timedelta(minutes=s.show_minutes), Project.status != "ignored")
+        .order_by(Project.first_seen_at.desc()).limit(s.max_recent)
+    ).all()
+    items = []
+    for p in rows:
+        born = p.first_seen_at.replace(tzinfo=None)
+        left = int((born + timedelta(minutes=s.show_minutes) - n).total_seconds())
+        items.append({
+            "id": p.id, "mostaql_id": p.mostaql_id, "title": p.title, "url": p.url,
+            "category": p.category, "budget_min": p.budget_min, "budget_max": p.budget_max,
+            "proposals_count": p.proposals_count, "posted_text": p.posted_text,
+            "ai_score": p.ai_score, "ai_summary": p.ai_summary,
+            "seconds_left": max(left, 0), "total_seconds": s.show_minutes * 60,
+        })
+    return {
+        "items": items, "show_minutes": s.show_minutes, "running": services.is_running(),
+        "interval_min": max(s.min_interval_min, s.refresh_interval_min),
+    }
 
 
 @api.get("/categories")
